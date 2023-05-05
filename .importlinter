@@ -1,0 +1,30 @@
+# TODO: migrate to pyproject.toml
+[importlinter]
+root_package = ggshield
+
+[importlinter:contract:secret_cmd]
+name = Secret commands
+type = layers
+layers =
+    ggshield.cmd.secret
+    ggshield.secret
+    ggshield.scan
+    ggshield.core
+
+[importlinter:contract:iac_cmd]
+name = IaC commands
+type = layers
+layers =
+    ggshield.cmd.iac
+    ggshield.iac
+    ggshield.scan
+    ggshield.core
+
+[importlinter:contract:sca_cmd]
+name = sca commands
+type = layers
+layers =
+    ggshield.cmd.sca
+    ggshield.sca
+    ggshield.scan
+    ggshield.core
