@@ -4,9 +4,10 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median, stdev
-from typing import Dict, Iterable, List, Optional, TextIO, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import click
+from markdown_utils import print_markdown_table
 from perfbench_utils import RawReport, get_raw_report_path, work_dir_option
 
 
@@ -27,51 +28,19 @@ class ReportRow:
 
 @dataclass
 class Duration:
+    """The duration of benchmark entry. `deviation` can be None if there was only one
+    run."""
+
     value: float
     deviation: Optional[float]
 
 
-def print_markdown_table(
-    out: TextIO, rows: List[List[str]], headers: List[str], alignments: str
-) -> None:
-    """
-    Prints a Markdown table.
-
-    `alignments` is a string of one character per column. The character must be L or R,
-    defining left or right alignment.
-    """
-    assert len(headers) == len(alignments)
-
-    widths = [0] * len(headers)
-    for row in [headers, *rows]:
-        for idx, cell in enumerate(row):
-            width = len(cell)
-            widths[idx] = max(widths[idx], width)
-
-    def print_row(row: Iterable[str]) -> None:
-        for cell, alignment, width in zip(row, alignments, widths):
-            if alignment == "R":
-                cell = cell.rjust(width)
-            else:
-                cell = cell.ljust(width)
-            out.write(f"| {cell} ")
-        out.write("|\n")
-
-    # print rows
-    print_row(headers)
-    separator_row = [
-        "-" * (w - 1) + (":" if a == "R" else "-") for a, w in zip(alignments, widths)
-    ]
-    print_row(separator_row)
-
-    for row in rows:
-        print_row(row)
-
-
-def create_duration_row(
+def create_duration_list(
     sorted_versions: List[str], durations_for_versions: Dict[str, List[float]]
 ) -> List[Duration]:
-    row: List[Duration] = []
+    """Create a list of Duration for all entries in durations_for_versions.
+    The list is ordered according to `sorted_versions`."""
+    lst: List[Duration] = []
     for version in sorted_versions:
         durations_for_version = durations_for_versions[version]
         value = median(durations_for_version)
@@ -80,14 +49,35 @@ def create_duration_row(
             deviation = stdev(durations_for_version)
         else:
             deviation = None
-        row.append(Duration(value, deviation))
+        lst.append(Duration(value, deviation))
 
-    return row
+    return lst
 
 
-def create_duration_cells(
+def print_csv_output(
     sorted_versions: List[str],
-    durations_for_versions: Dict[str, List[float]],
+    rows: Iterable[ReportRow],
+):
+    writer = csv.writer(sys.stdout)
+
+    # Header row
+    headers = ["command", "dataset"]
+    for version in sorted_versions:
+        headers.extend([version, f"{version} (deviation)"])
+    writer.writerow(headers)
+
+    # Data
+    for row in sorted(rows, key=lambda x: (x.command, x.dataset)):
+        durations = create_duration_list(sorted_versions, row.durations_for_versions)
+        table_row = [row.command, row.dataset]
+        for duration in durations:
+            table_row.append(str(duration.value))
+            table_row.append(str(duration.deviation))
+        writer.writerow(table_row)
+
+
+def create_markdown_cells(
+    durations: List[Duration],
     min_delta: float,
     max_delta: float,
 ) -> Tuple[List[str], bool]:
@@ -97,8 +87,6 @@ def create_duration_cells(
     cells: List[str] = []
     reference: Optional[float] = None
     fail = False
-
-    durations = create_duration_row(sorted_versions, durations_for_versions)
 
     for duration in durations:
         cell = f"{duration.value:.2f}s"
@@ -126,39 +114,6 @@ def create_duration_cells(
     return cells, fail
 
 
-def create_header_row(sorted_versions: List[str]) -> List[str]:
-    """Create headers (no delta column for reference)"""
-    headers = ["command", "dataset", sorted_versions[0]]
-    for version in sorted_versions[1:]:
-        headers.extend([version, "delta"])
-    return headers
-
-
-def print_csv_output(
-    sorted_versions: List[str],
-    rows: Iterable[ReportRow],
-):
-    writer = csv.writer(sys.stdout)
-
-    # Header row
-    headers = ["command", "dataset"]
-    for version in sorted_versions:
-        headers.extend([version, f"{version} (deviation)"])
-    writer.writerow(headers)
-
-    # Data
-    for row in sorted(rows, key=lambda x: (x.command, x.dataset)):
-        durations = create_duration_row(
-            sorted_versions,
-            row.durations_for_versions,
-        )
-        table_row = [row.command, row.dataset]
-        for duration in durations:
-            table_row.append(str(duration.value))
-            table_row.append(str(duration.deviation))
-        writer.writerow(table_row)
-
-
 def print_markdown_output(
     sorted_versions: List[str],
     rows: Iterable[ReportRow],
@@ -169,12 +124,8 @@ def print_markdown_output(
     table_rows = []
     has_failed = False
     for row in sorted(rows, key=lambda x: (x.command, x.dataset)):
-        duration_cells, fail = create_duration_cells(
-            sorted_versions,
-            row.durations_for_versions,
-            min_delta,
-            max_delta,
-        )
+        durations = create_duration_list(sorted_versions, row.durations_for_versions)
+        duration_cells, fail = create_markdown_cells(durations, min_delta, max_delta)
         has_failed |= fail
         table_rows.append([row.command, row.dataset, *duration_cells])
 
