@@ -464,6 +464,9 @@ class TestUserConfig:
             global_config_path,
             {
                 "version": 2,
+                "secret": {
+                    "show-secrets": True,
+                },
                 "sca": {
                     "ignored_paths": ["myglobalpath"],
                     "minimum_severity": "myglobalseverity",
@@ -481,6 +484,11 @@ class TestUserConfig:
             },
         )
         config = Config()
+
+        # Checks the global config value is not reset because local config does not
+        # contain the field
+        assert config.user_config.secret.show_secrets
+
         sca_config = config.user_config.sca
         assert isinstance(sca_config, SCAConfig)
         assert sca_config.ignored_paths == {"myglobalpath", "mypath"}
