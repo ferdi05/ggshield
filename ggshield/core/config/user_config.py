@@ -16,7 +16,7 @@ from ggshield.core.config.utils import (
     remove_common_dict_items,
     replace_in_keys,
     save_yaml_dict,
-    update_from_other_instance,
+    update_dict_from_other,
 )
 from ggshield.core.constants import DEFAULT_LOCAL_CONFIG_PATH
 from ggshield.core.errors import ParseError, UnexpectedError, format_validation_error
@@ -308,45 +308,71 @@ class UserConfig(FilteredConfig):
 
         Returns a UserConfig instance, and the path where updates should be saved
         """
-        user_config = UserConfig()
+        deprecation_messages: List[str] = []
         if config_path:
             logger.debug("Loading custom config from %s", config_path)
-            user_config._update_from_file(config_path)
+            dct = UserConfig._load_config_dict(config_path, deprecation_messages)
+            user_config = UserConfig.from_config_dict(dct)
+            user_config.deprecation_messages = deprecation_messages
             return user_config, config_path
 
+        user_config_dict: Dict[str, Any] = {}
         global_config_path = find_global_config_path()
         if global_config_path:
-            user_config._update_from_file(global_config_path)
+            dct = UserConfig._load_config_dict(global_config_path, deprecation_messages)
+            update_dict_from_other(user_config_dict, dct)
             logger.debug("Loaded global config from %s", global_config_path)
         else:
             logger.debug("No global config")
 
         local_config_path = find_local_config_path()
         if local_config_path:
-            user_config._update_from_file(local_config_path)
+            dct = UserConfig._load_config_dict(local_config_path, deprecation_messages)
+            update_dict_from_other(user_config_dict, dct)
             config_path = local_config_path
             logger.debug("Loaded local config from %s", local_config_path)
         else:
             logger.debug("No local config")
 
+        user_config = UserConfig.from_config_dict(user_config_dict)
+        user_config.deprecation_messages = deprecation_messages
+
         if config_path is None:
             config_path = Path(DEFAULT_LOCAL_CONFIG_PATH)
         return user_config, config_path
 
-    def _update_from_file(self, config_path: Path) -> None:
+    @staticmethod
+    def _load_config_dict(
+        config_path: Path, deprecation_messages: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Load configuration from `config_path` as a dict.
+        Appends any deprecation message regarding this file to `deprecation_messages`.
+        """
         try:
-            data = load_yaml_dict(config_path) or {"version": CURRENT_CONFIG_VERSION}
+            # load_yaml_dict returns None if `config_path` does not exist. In this case,
+            # pretend we loaded a config file with just the version set to the latest
+            # version so that we don't get deprecation messages
+            dct = load_yaml_dict(config_path) or {"version": CURRENT_CONFIG_VERSION}
+        except ValueError as exc:
+            raise ParseError(str(exc)) from exc
+        if dct.get("version", 1) == 1:
+            deprecation_messages.append(
+                f"{config_path} uses a deprecated configuration file format."
+                " Run `ggshield config migrate` to migrate it to the latest version."
+            )
+        return dct
+
+    @staticmethod
+    def from_config_dict(data: Dict[str, Any]) -> "UserConfig":
+        try:
             config_version = data.pop("version", 1)
             if config_version == 2:
                 _fix_ignore_known_secrets(data)
-                obj = UserConfig.from_dict(data)
+                return UserConfig.from_dict(data)
             elif config_version == 1:
                 replace_in_keys(data, old_char="-", new_char="_")
-                self.deprecation_messages.append(
-                    f"{config_path} uses a deprecated configuration file format."
-                    " Run `ggshield config migrate` to migrate it to the latest version."
-                )
-                obj = UserV1Config.load_v1(data)
+                return UserV1Config.load_v1(data)
             else:
                 raise UnexpectedError(
                     f"Don't know how to load config version {config_version}"
@@ -354,10 +380,6 @@ class UserConfig(FilteredConfig):
         except ValidationError as exc:
             message = format_validation_error(exc)
             raise ParseError(message) from exc
-        except ValueError as exc:
-            raise ParseError(str(exc)) from exc
-
-        update_from_other_instance(self, obj)
 
 
 UserConfig.SCHEMA = marshmallow_dataclass.class_schema(UserConfig)(
