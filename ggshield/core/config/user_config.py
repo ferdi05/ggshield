@@ -289,6 +289,10 @@ class UserConfig(FilteredConfig):
         """
         Save config to config_path
         """
+        dct = self.to_config_dict()
+        save_yaml_dict(dct, config_path)
+
+    def to_config_dict(self) -> Dict[str, Any]:
         dct = self.to_dict()
         default_dct = UserConfig.from_dict({}).to_dict()
 
@@ -297,7 +301,7 @@ class UserConfig(FilteredConfig):
         dct["version"] = CURRENT_CONFIG_VERSION
 
         replace_in_keys(dct, old_char="_", new_char="-")
-        save_yaml_dict(dct, config_path)
+        return dct
 
     @classmethod
     def load(cls, config_path: Optional[Path] = None) -> Tuple["UserConfig", Path]:
@@ -356,27 +360,28 @@ class UserConfig(FilteredConfig):
             dct = load_yaml_dict(config_path) or {"version": CURRENT_CONFIG_VERSION}
         except ValueError as exc:
             raise ParseError(str(exc)) from exc
-        if dct.get("version", 1) == 1:
+
+        replace_in_keys(dct, old_char="_", new_char="-")
+
+        config_version = dct.pop("version", 1)
+        if config_version == 2:
+            _fix_ignore_known_secrets(dct)
+        elif config_version == 1:
             deprecation_messages.append(
                 f"{config_path} uses a deprecated configuration file format."
                 " Run `ggshield config migrate` to migrate it to the latest version."
+            )
+            dct = UserV1Config.load_v1_dict(dct, deprecation_messages)
+        else:
+            raise UnexpectedError(
+                f"Don't know how to load config version {config_version}"
             )
         return dct
 
     @staticmethod
     def from_config_dict(data: Dict[str, Any]) -> "UserConfig":
         try:
-            config_version = data.pop("version", 1)
-            if config_version == 2:
-                _fix_ignore_known_secrets(data)
-                return UserConfig.from_dict(data)
-            elif config_version == 1:
-                replace_in_keys(data, old_char="-", new_char="_")
-                return UserV1Config.load_v1(data)
-            else:
-                raise UnexpectedError(
-                    f"Don't know how to load config version {config_version}"
-                )
+            return UserConfig.from_dict(data)
         except ValidationError as exc:
             message = format_validation_error(exc)
             raise ParseError(message) from exc
@@ -481,6 +486,66 @@ class UserV1Config(FromDictMixin):
             secret=secret,
             deprecation_messages=deprecation_messages,
         )
+
+    @staticmethod
+    def load_v1_dict(
+        data: Dict[str, Any], deprecation_messages: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Takes a dict representing a v1 .gitguardian.yaml and returns a v2 dict
+        """
+        # If data contains the old "api-url" key, turn it into an "instance" key,
+        # but only if there is no "instance" key
+        try:
+            api_url = data.pop("api-url")
+        except KeyError:
+            pass
+        else:
+            if "instance" not in data:
+                data["instance"] = api_to_dashboard_url(api_url, warn=True)
+
+        UserV1Config.matches_ignore_to_dict(data)
+
+        if "all-policies" in data:
+            deprecation_messages.append(
+                "The `all-policies` option has been deprecated and is now ignored."
+            )
+
+        if "ignore-default-excludes" in data:
+            deprecation_messages.append(
+                "The `ignore-default-exclude` option has been deprecated and is now ignored."
+            )
+
+        secret_dct = {}
+        if matches_ignore := data.get("matches-ignore"):
+            secret_dct["ignored-matches"] = [
+                IgnoredMatch.from_dict(secret).to_dict() for secret in matches_ignore
+            ]
+            replace_in_keys(secret_dct["ignored-matches"], "_", "-")
+
+        def copy_if_set(dct, dst_key, src_key=None):
+            if src_key is None:
+                src_key = dst_key
+            try:
+                value = data[src_key]
+            except KeyError:
+                return
+            dct[dst_key] = value
+
+        copy_if_set(secret_dct, "show-secrets")
+        copy_if_set(secret_dct, "ignored-detectors", "banlisted-detectors")
+        copy_if_set(secret_dct, "ignored-paths", "paths-ignore")
+
+        dct = {
+            "secret": secret_dct,
+        }
+        copy_if_set(dct, "instance")
+        copy_if_set(dct, "exit-zero")
+        copy_if_set(dct, "verbose")
+        copy_if_set(dct, "allow-self-signed")
+        copy_if_set(dct, "max-commits-for-hook")
+
+        return dct
 
     @staticmethod
     def matches_ignore_to_dict(data: Dict[str, Any]) -> None:
